@@ -1,4 +1,4 @@
-package main
+package restRouter
 
 import (
 	"bufio"
@@ -6,46 +6,34 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
+	"whishper/storageApi"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/golang-jwt/jwt"
-
 	"github.com/valyala/fasthttp"
 )
 
-var index = []byte(`<!DOCTYPE html>
-<html>
-<body>
-
-<h1>SSE Messages</h1>
-<div id="result"></div>
-
-<script>
-if(typeof(EventSource) !== "undefined") {
-  var source = new EventSource("http://127.0.0.1:3000/sse");
-  source.onmessage = function(event) {
-    document.getElementById("result").innerHTML += event.data + "<br>";
-  };
-} else {
-  document.getElementById("result").innerHTML = "Sorry, your browser does not support server-sent events...";
+type RestRouter struct {
+	App         *fiber.App
+	Storage     *storageApi.StorageApi
+	connections map[string](chan string)
 }
-</script>
-
-</body>
-</html>
-`)
 
 type UserClaims struct {
 	Address string `json:"address"`
 	jwt.StandardClaims
 }
 
-func generate(c *fiber.Ctx) error {
+type User struct {
+	IsEnabled bool `json:"is_enabled"`
+}
+
+func (restRouter *RestRouter) generateKey(c *fiber.Ctx) error {
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 128) // 64 Bytes
 	if err != nil {
@@ -58,47 +46,49 @@ func generate(c *fiber.Ctx) error {
 
 	privKeyB64 := hex.EncodeToString(privKeyBytes)
 	pubKeyB64 := hex.EncodeToString(pubKeyBytes)
+	key := fmt.Sprintf("address/%s", pubKeyB64)
+	user := User{IsEnabled: false}
+	data, err := json.Marshal(user)
+	if err != nil {
+		panic(err)
+	}
+
+	restRouter.Storage.Set(key, string(data))
 
 	return c.JSON(fiber.Map{"privKey": privKeyB64, "pubKey": pubKeyB64})
-
-	/*
-	   privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
-
-	   privateKeyPEM := pem.EncodeToMemory(&pem.Block{
-	   Type:  "RSA PRIVATE KEY",
-	   Bytes: privateKeyBytes,
-	   })
-
-	        err = os.WriteFile("private.pem", privateKeyPEM, 0644)
-	        if err != nil {
-
-	        }
-
-	        publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
-	        if err != nil {
-
-	        }
-
-	         publicKeyPEM := pem.EncodeToMemory(&pem.Block{
-	           Type:  "RSA PUBLIC KEY",
-	           Bytes: publicKeyBytes,
-	         })
-
-	        err = os.WriteFile("public.pem", publicKeyPEM, 0644)
-	        if err != nil {
-
-	        }
-	*/
 }
 
-func listen(c *fiber.Ctx, addr string, ch chan string) error {
+func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
+	var address string
+	if t := c.Get("Authorization"); t != "" {
+
+		res := strings.Fields(t)
+		fmt.Printf("Listen Get Token :[%s]\n", res[1])
+		parsedAccessToken, err := jwt.ParseWithClaims(res[1], &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+			return []byte("secret"), nil
+		})
+		if err != nil {
+			fmt.Printf("Could not Parse : [%s]\n", res[1])
+			return nil
+		}
+
+		userClaims := parsedAccessToken.Claims.(*UserClaims)
+
+		address = userClaims.Address
+		fmt.Printf("Listen on Address: %s\n", address)
+
+	}
+
+	restRouter.connections[address] = make(chan string, 16)
+	ch := restRouter.connections[address]
+
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("Transfer-Encoding", "chunked")
 
 	c.Status(fiber.StatusOK).Context().SetBodyStreamWriter(fasthttp.StreamWriter(func(w *bufio.Writer) {
-		fmt.Println("Connected Address: " + addr)
+		fmt.Println("Connected Address: " + address)
 		var msg string
 		for {
 
@@ -143,7 +133,7 @@ func listen(c *fiber.Ctx, addr string, ch chan string) error {
 	return nil
 }
 
-func login(c *fiber.Ctx) error {
+func (restRouter *RestRouter) login(c *fiber.Ctx) error {
 	payload := struct {
 		Address  string `json:"address"`
 		Password string `json:"password"`
@@ -180,7 +170,7 @@ func login(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"token": t})
 }
 
-func postMsg(c *fiber.Ctx, connections map[string]chan string) error {
+func (restRouter *RestRouter) postMsg(c *fiber.Ctx) error {
 	payload := struct {
 		From string `json:"from"`
 		To   string `json:"to"`
@@ -196,17 +186,15 @@ func postMsg(c *fiber.Ctx, connections map[string]chan string) error {
 		c.Context().SetStatusCode(404)
 		return c.JSON(fiber.Map{"error": "Not found from/to address"})
 	}
-
-	ch := connections[payload.To]
+	// @ppierog : Fix this
+	ch := restRouter.connections[payload.To]
 	msg := fmt.Sprintf("{from:%s,msg:%s}\n", payload.From, payload.Msg)
 	ch <- msg
 
 	return c.JSON(fiber.Map{"status": "OK"})
 }
 
-func main() {
-
-	connections := make(map[string](chan string))
+func Init(storageApi *storageApi.StorageApi) RestRouter {
 
 	// Fiber instance
 	app := fiber.New()
@@ -219,44 +207,17 @@ func main() {
 		// AllowCredentials: true,
 	}))
 
-	app.Get("/", func(c *fiber.Ctx) error {
-		c.Response().Header.SetContentType(fiber.MIMETextHTMLCharsetUTF8)
-		return c.Status(fiber.StatusOK).Send(index)
-	})
+	restRouter := RestRouter{}
+	restRouter.Storage = storageApi
+	restRouter.connections = make(map[string](chan string))
 
-	app.Post("/login", login)
+	app.Post("/login", restRouter.login)
+	app.Post("/generate", restRouter.generateKey)
+	app.Post("/postMsg", restRouter.postMsg)
 
-	app.Post("/generate", generate)
+	app.Get("/listen", restRouter.listen)
 
-	app.Get("/listen", func(c *fiber.Ctx) error {
-		var address string
-		if t := c.Get("Authorization"); t != "" {
+	restRouter.App = app
 
-			res := strings.Fields(t)
-			fmt.Printf("Listen Get Token :[%s]\n", res[1])
-			parsedAccessToken, err := jwt.ParseWithClaims(res[1], &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
-				return []byte("secret"), nil
-			})
-			if err != nil {
-				fmt.Printf("Could not Parse : [%s]\n", res[1])
-				return nil
-			}
-
-			userClaims := parsedAccessToken.Claims.(*UserClaims)
-
-			address = userClaims.Address
-			fmt.Printf("Listen on Address: %s\n", address)
-
-		}
-		connections[address] = make(chan string, 16)
-		return listen(c, address, connections[address])
-	})
-
-	app.Post("/postMsg", func(c *fiber.Ctx) error {
-
-		return postMsg(c, connections)
-	})
-
-	// Start server
-	log.Fatal(app.Listen(":3000"))
+	return restRouter
 }
