@@ -2,14 +2,18 @@ package restRouter
 
 import (
 	"bufio"
+	"crypto"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"whishper/authMsgGenerator"
 	"whishper/storageApi"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,32 +34,171 @@ type UserClaims struct {
 }
 
 type User struct {
-	IsEnabled bool `json:"is_enabled"`
+	IsRegistered bool   `json:"is_registered"`
+	Address      string `json:"address"`    // hexString(md5( Marshaled pub key))
+	PubKey       string `json:"pub_key"`    // b64 Marshaled PubKey
+	PrivKey      string `json:"priv_key"`   // b64 Marshaled PrivbKey
+	CreatedAt    int64  `json:"created_at"` // unix time
+}
+
+type UserLogin struct {
+	Address   string `json:"address"`   // hexString(md5( Marshaled pub key))
+	Signature string `json:"signature"` // b64 Address Signature
 }
 
 func (restRouter *RestRouter) generateKey(c *fiber.Ctx) error {
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, 128) // 64 Bytes
+	privateKey, err := rsa.GenerateKey(rand.Reader, 512) // 64 Bytes
 	if err != nil {
-
+		c.Context().SetStatusCode(401)
+		return err
 	}
 
 	publicKey := &privateKey.PublicKey
 	pubKeyBytes := x509.MarshalPKCS1PublicKey(publicKey)
 	privKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
 
-	privKeyB64 := hex.EncodeToString(privKeyBytes)
-	pubKeyB64 := hex.EncodeToString(pubKeyBytes)
-	key := fmt.Sprintf("address/%s", pubKeyB64)
-	user := User{IsEnabled: false}
-	data, err := json.Marshal(user)
+	privKeyB64 := base64.StdEncoding.EncodeToString(privKeyBytes)
+	pubKeyB64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
+	pubKeyMd5 := md5.Sum(pubKeyBytes)
+	address := hex.EncodeToString(pubKeyMd5[:])
+	redisKey := fmt.Sprintf("address/%s", address)
+	user := User{IsRegistered: false, PubKey: pubKeyB64, Address: address}
+	marshaledUser, err := json.Marshal(user)
+
 	if err != nil {
 		panic(err)
 	}
 
-	restRouter.Storage.Set(key, string(data))
+	restRouter.Storage.Set(redisKey, string(marshaledUser))
+	user.PrivKey = privKeyB64
 
-	return c.JSON(fiber.Map{"privKey": privKeyB64, "pubKey": pubKeyB64})
+	return c.JSON(user)
+}
+
+func (restRouter *RestRouter) registerKey(c *fiber.Ctx) error {
+	userReq := UserLogin{}
+
+	if err := c.BodyParser(&userReq); err != nil {
+		c.Context().SetStatusCode(401)
+		return err
+	}
+	redisKey := fmt.Sprintf("address/%s", userReq.Address)
+	value, err := restRouter.Storage.Get(redisKey)
+	if err != nil {
+		return c.JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	user := User{}
+	if json.Unmarshal([]byte(value), &user) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not unmarchal User"})
+	}
+
+	decodedSignature, err := base64.StdEncoding.DecodeString(userReq.Signature)
+	if err != nil || len(decodedSignature) == 0 {
+		return c.JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	derPubKey, err := base64.StdEncoding.DecodeString(user.PubKey)
+
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not decode pubKey from Redis : " + err.Error()})
+	}
+
+	pubKey, err := x509.ParsePKCS1PublicKey(derPubKey)
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not Parse PubKey : " + err.Error()})
+	}
+
+	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, []byte(user.Address), decodedSignature) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not Verify Signature"})
+	}
+
+	user.IsRegistered = true
+	marshaledUser, err := json.Marshal(user)
+
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not marshal User :" + err.Error()})
+	}
+
+	restRouter.Storage.Set(redisKey, string(marshaledUser))
+
+	return c.JSON(user)
+}
+
+func (restRouter *RestRouter) login(c *fiber.Ctx) error {
+	userReq := UserLogin{}
+	if err := c.BodyParser(&userReq); err != nil {
+		c.Context().SetStatusCode(401)
+		return err
+	}
+
+	if userReq.Address == "" || userReq.Signature == "" {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	redisKey := fmt.Sprintf("address/%s", userReq.Address)
+	value, err := restRouter.Storage.Get(redisKey)
+	if err != nil {
+		return c.JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	user := User{}
+	if json.Unmarshal([]byte(value), &user) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not unmarchal User"})
+	}
+
+	derPubKey, err := base64.StdEncoding.DecodeString(user.PubKey)
+
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not decode pubKey from Redis : " + err.Error()})
+	}
+
+	pubKey, err := x509.ParsePKCS1PublicKey(derPubKey)
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not Parse PubKey : " + err.Error()})
+	}
+
+	decodedSignature, err := base64.StdEncoding.DecodeString(userReq.Signature)
+	if err != nil || len(decodedSignature) == 0 {
+		return c.JSON(fiber.Map{"error": "Could not decode signature"})
+	}
+
+	auth := authMsgGenerator.Init()
+
+	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, auth.Get().Sha256, decodedSignature) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not Verify Signature"})
+	}
+
+	claims := UserClaims{
+		Address: userReq.Address,
+		StandardClaims: jwt.StandardClaims{
+			IssuedAt:  time.Now().Unix(),
+			ExpiresAt: time.Now().Add(time.Minute * 15).Unix(),
+		}}
+
+	// Create token.
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Generate encoded token and send it as response.
+	t, err := token.SignedString([]byte("DEAD-BEEF-CAFE-FEACE"))
+	if err != nil {
+		return c.SendStatus(fiber.StatusInternalServerError)
+	}
+
+	fmt.Printf("Authenticated address %s\nGO Ahead %s\n", userReq.Address, t)
+
+	return c.JSON(fiber.Map{"token": t})
 }
 
 func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
@@ -133,43 +276,6 @@ func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
 	return nil
 }
 
-func (restRouter *RestRouter) login(c *fiber.Ctx) error {
-	payload := struct {
-		Address  string `json:"address"`
-		Password string `json:"password"`
-	}{}
-
-	if err := c.BodyParser(&payload); err != nil {
-		c.Context().SetStatusCode(401)
-		return err
-	}
-
-	if payload.Address == "" || payload.Password == "" {
-		c.Context().SetStatusCode(401)
-		return c.JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	claims := UserClaims{
-		Address: payload.Address,
-		StandardClaims: jwt.StandardClaims{
-			IssuedAt:  time.Now().Unix(),
-			ExpiresAt: time.Now().Add(time.Minute * 15).Unix(),
-		}}
-
-	// Create token.
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// Generate encoded token and send it as response.
-	t, err := token.SignedString([]byte("secret"))
-	if err != nil {
-		return c.SendStatus(fiber.StatusInternalServerError)
-	}
-
-	fmt.Printf("Authenticated address %s\nGO Ahead %s\n", payload.Address, t)
-
-	return c.JSON(fiber.Map{"token": t})
-}
-
 func (restRouter *RestRouter) postMsg(c *fiber.Ctx) error {
 	payload := struct {
 		From string `json:"from"`
@@ -213,7 +319,8 @@ func Init(storageApi *storageApi.StorageApi) RestRouter {
 
 	app.Post("/login", restRouter.login)
 	app.Post("/generate", restRouter.generateKey)
-	app.Post("/postMsg", restRouter.postMsg)
+	app.Post("/register", restRouter.registerKey)
+	app.Post("/post", restRouter.postMsg)
 
 	app.Get("/listen", restRouter.listen)
 

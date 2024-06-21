@@ -28,13 +28,7 @@ func (s StorageApi) Set(key string, value string) {
 	}
 }
 
-func (s StorageApi) Get(key string) string {
+func (s StorageApi) Get(key string) (string, error) {
 	ctx := context.Background()
-	val, err := s.RedisClient.Get(ctx, key).Result()
-
-	if err != nil {
-		panic(err)
-	}
-	return val
-
+	return s.RedisClient.Get(ctx, key).Result()
 }
