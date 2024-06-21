@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"whishper/authMsgGenerator"
+	"whishper/helloGenerator"
 	"whishper/storageApi"
 
 	"github.com/gofiber/fiber/v2"
@@ -173,9 +173,9 @@ func (restRouter *RestRouter) login(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"error": "Could not decode signature"})
 	}
 
-	auth := authMsgGenerator.Init()
+	hello := helloGenerator.Init()
 
-	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, auth.Get().Sha256, decodedSignature) != nil {
+	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hello.Get().Sha256, decodedSignature) != nil {
 		c.Context().SetStatusCode(401)
 		return c.JSON(fiber.Map{"error": "Could not Verify Signature"})
 	}
@@ -199,6 +199,13 @@ func (restRouter *RestRouter) login(c *fiber.Ctx) error {
 	fmt.Printf("Authenticated address %s\nGO Ahead %s\n", userReq.Address, t)
 
 	return c.JSON(fiber.Map{"token": t})
+}
+
+func (restRouter *RestRouter) hello(c *fiber.Ctx) error {
+
+	hello := helloGenerator.Init()
+
+	return c.JSON(hello.Get())
 }
 
 func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
@@ -317,11 +324,12 @@ func Init(storageApi *storageApi.StorageApi) RestRouter {
 	restRouter.Storage = storageApi
 	restRouter.connections = make(map[string](chan string))
 
-	app.Post("/login", restRouter.login)
 	app.Post("/generate", restRouter.generateKey)
 	app.Post("/register", restRouter.registerKey)
-	app.Post("/post", restRouter.postMsg)
+	app.Post("/login", restRouter.login)
 
+	app.Get("/hello", restRouter.hello)
+	app.Post("/post", restRouter.postMsg)
 	app.Get("/listen", restRouter.listen)
 
 	restRouter.App = app
