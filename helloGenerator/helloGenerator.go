@@ -1,48 +1,98 @@
 package helloGenerator
 
 import (
+	"bufio"
 	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"os"
 	"time"
 )
 
-type HelloGenerator struct {
+type Wisdom struct {
+	Author      string `json:"author,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Link        string `json:"link,omitempty"`
 }
 
 type HelloMsg struct {
-	Msg       string `json:"msg,omitempty"`
-	Sha256    []byte `json:"sha_256,omitempty"`
-	IssuedAt  int64  `json:"issued_at,omitempty"`
-	ExpiresAt int64  `json:"expires_at,omitempty"`
+	Msg    string `json:"msg,omitempty"`
+	Sha256 []byte `json:"sha_256,omitempty"`
+	Wisdom
+	IssuedAt  int64 `json:"issued_at,omitempty"`
+	ExpiresAt int64 `json:"expires_at,omitempty"`
 }
 
-func Init() HelloGenerator {
+type Quote struct {
+	msg    string
+	wisdom *Wisdom
+}
+
+type HelloGenerator struct {
+	wisdoms []Wisdom
+	msgs    []Quote
+}
+
+func Create() HelloGenerator {
 	return HelloGenerator{}
 }
 
-func (s HelloGenerator) Get() HelloMsg {
-	msgs := []string{
-		"I met a traveller from an antique land",
-		"Who said: Two vast and trunkless legs of stone",
-		"Stand in the desart. Near them, on the sand",
-		"Half sunk, a shattered visage lies, whose frown",
-		"And wrinkled lip, and sneer of cold command",
-		"Tell that its sculptor well those passions read",
-		"Which yet survive, stamped on these lifeless things",
-		"The hand that mocked them and the heart that fed:",
-		"And on the pedestal these words appear:",
-		"My name is Ozymandias, King of Kings:",
-		"Look on my works, ye Mighty, and despair!",
-		"No thing beside remains. Round the decay",
-		"Of that colossal wreck, boundless and bare",
-		"The lone and level sands stretch far away.",
-		"— Percy Shelley, \"Ozymandias\", 1819 edition",
+func (h *HelloGenerator) Load(helloFolder string, numWisdoms int) {
+	wisdomPath := ""
+	manifestPath := ""
+	h.wisdoms = make([]Wisdom, 0, numWisdoms)
+
+	for i := range numWisdoms {
+		wisdomPath = fmt.Sprintf("%s/%d/content", helloFolder, i+1)
+		manifestPath = fmt.Sprintf("%s/%d/manifest", helloFolder, i+1)
+		manifest, err := os.ReadFile(manifestPath)
+		if err != nil {
+			panic("Could not load manifest file : " + manifestPath + ", error : " + err.Error())
+		}
+
+		wisdom := Wisdom{}
+
+		if json.Unmarshal(manifest, &wisdom) != nil {
+			panic("Could not unmarshal manifest file to wisdom : " + manifestPath)
+		}
+		h.wisdoms = append(h.wisdoms, wisdom)
+
+		file, err := os.Open(wisdomPath)
+		if err != nil {
+			panic("Could not Open wisdom path : " + wisdomPath + ", err : " + err.Error())
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			h.msgs = append(h.msgs, Quote{scanner.Text(), &h.wisdoms[len(h.wisdoms)-1]})
+
+		}
+
+		if err := scanner.Err(); err != nil {
+			panic("Wrong state of scaner : " + err.Error())
+		}
+		file.Close()
+
 	}
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(h.msgs), func(i, j int) {
+		h.msgs[i], h.msgs[j] = h.msgs[j], h.msgs[i]
+	})
 
-	h := sha256.New()
-	h.Write([]byte(msgs[9]))
-	bs := h.Sum(nil)
+}
 
-	return HelloMsg{Msg: msgs[9], Sha256: bs, IssuedAt: time.Now().Unix(),
+func (h *HelloGenerator) Get() HelloMsg {
+	len := len(h.msgs)
+	index := rand.Intn(len)
+
+	quote := h.msgs[index]
+
+	s := sha256.New()
+	s.Write([]byte(quote.msg))
+	bs := s.Sum(nil)
+
+	return HelloMsg{Msg: quote.msg, Sha256: bs, Wisdom: *quote.wisdom, IssuedAt: time.Now().Unix(),
 		ExpiresAt: time.Now().Add(time.Minute * 15).Unix()}
 
 }

@@ -25,6 +25,7 @@ import (
 type RestRouter struct {
 	App         *fiber.App
 	Storage     *storageApi.StorageApi
+	Hello       helloGenerator.HelloGenerator
 	connections map[string](chan string)
 }
 
@@ -173,9 +174,7 @@ func (restRouter *RestRouter) login(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"error": "Could not decode signature"})
 	}
 
-	hello := helloGenerator.Init()
-
-	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hello.Get().Sha256, decodedSignature) != nil {
+	if rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, restRouter.Hello.Get().Sha256, decodedSignature) != nil {
 		c.Context().SetStatusCode(401)
 		return c.JSON(fiber.Map{"error": "Could not Verify Signature"})
 	}
@@ -203,9 +202,7 @@ func (restRouter *RestRouter) login(c *fiber.Ctx) error {
 
 func (restRouter *RestRouter) hello(c *fiber.Ctx) error {
 
-	hello := helloGenerator.Init()
-
-	return c.JSON(hello.Get())
+	return c.JSON(restRouter.Hello.Get())
 }
 
 func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
@@ -323,6 +320,8 @@ func Init(storageApi *storageApi.StorageApi) RestRouter {
 	restRouter := RestRouter{}
 	restRouter.Storage = storageApi
 	restRouter.connections = make(map[string](chan string))
+	restRouter.Hello = helloGenerator.Create()
+	restRouter.Hello.Load("./wisdoms", 18)
 
 	app.Post("/generate", restRouter.generateKey)
 	app.Post("/register", restRouter.registerKey)
