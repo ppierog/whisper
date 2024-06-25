@@ -33,6 +33,7 @@ type Quote struct {
 type HelloGenerator struct {
 	wisdoms []Wisdom
 	msgs    []Quote
+	cnt     int
 }
 
 func Create() HelloGenerator {
@@ -80,11 +81,14 @@ func (h *HelloGenerator) Load(helloFolder string, numWisdoms int) {
 		h.msgs[i], h.msgs[j] = h.msgs[j], h.msgs[i]
 	})
 
+	h.cnt = 0
+
 }
 
 func (h *HelloGenerator) Get() HelloMsg {
 	len := len(h.msgs)
-	index := rand.Intn(len)
+	index := h.cnt % len
+	h.cnt++
 
 	quote := h.msgs[index]
 
