@@ -16,6 +16,8 @@ import (
 	"whishper/helloGenerator"
 	"whishper/storageApi"
 
+	"github.com/skip2/go-qrcode"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/golang-jwt/jwt"
@@ -36,10 +38,10 @@ type UserClaims struct {
 
 type User struct {
 	IsRegistered bool   `json:"is_registered"`
-	Address      string `json:"address"`    // hexString(md5( Marshaled pub key))
-	PubKey       string `json:"pub_key"`    // b64 Marshaled PubKey
-	PrivKey      string `json:"priv_key"`   // b64 Marshaled PrivbKey
-	CreatedAt    int64  `json:"created_at"` // unix time
+	Address      string `json:"address"`            // hexString(md5( Marshaled pub key))
+	PubKey       string `json:"pub_key"`            // b64 Marshaled PubKey
+	PrivKey      string `json:"priv_key,omitempty"` // b64 Marshaled PrivbKey
+	CreatedAt    int64  `json:"created_at"`         // unix time
 }
 
 type UserLogin struct {
@@ -205,6 +207,56 @@ func (restRouter *RestRouter) hello(c *fiber.Ctx) error {
 	return c.JSON(restRouter.Hello.Get())
 }
 
+func (restRouter *RestRouter) address(c *fiber.Ctx) error {
+
+	tokenMap := c.AllParams()
+	if tokenMap["address"] == "" {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Not found address : "})
+	}
+	address := tokenMap["address"]
+	redisKey := fmt.Sprintf("address/%s", address)
+	value, err := restRouter.Storage.Get(redisKey)
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Not found address : "})
+	}
+	user := User{}
+	if json.Unmarshal([]byte(value), &user) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not unmarchal User"})
+	}
+	return c.JSON(user)
+
+}
+
+func (restRouter *RestRouter) qraddress(c *fiber.Ctx) error {
+
+	tokenMap := c.AllParams()
+	if tokenMap["address"] == "" {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Not found address : "})
+	}
+	address := tokenMap["address"]
+	redisKey := fmt.Sprintf("address/%s", address)
+	value, err := restRouter.Storage.Get(redisKey)
+	if err != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Not found address : "})
+	}
+	user := User{}
+	if json.Unmarshal([]byte(value), &user) != nil {
+		c.Context().SetStatusCode(401)
+		return c.JSON(fiber.Map{"error": "Could not unmarchal User"})
+	}
+
+	var png []byte
+	png, err = qrcode.Encode(user.Address, qrcode.Medium, 256)
+	c.Type("png") // => "image/png"
+	c.Write(png)  // => "Hello, World!"
+	return err
+}
+
 func (restRouter *RestRouter) listen(c *fiber.Ctx) error {
 	var address string
 	if t := c.Get("Authorization"); t != "" {
@@ -327,6 +379,8 @@ func Init(storageApi *storageApi.StorageApi) RestRouter {
 	app.Post("/register", restRouter.registerKey)
 	app.Post("/login", restRouter.login)
 
+	app.Get("/address/:address", restRouter.address)
+	app.Get("/address/:address/qrcode", restRouter.qraddress)
 	app.Get("/hello", restRouter.hello)
 	app.Post("/post", restRouter.postMsg)
 	app.Get("/listen", restRouter.listen)
